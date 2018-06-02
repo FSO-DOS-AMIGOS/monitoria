@@ -1,154 +1,190 @@
 #include <stdio.h>
 #include <pthread.h>
+#include <semaphore.h>
 #include <stdlib.h> //rand() e srand() estao aqui
 #include <time.h>
+#include <unistd.h>
+
+//$ gcc main.c -o main -lpthread
 
 #define MAX_STUDENTS 40
 #define MIN_STUDENTS 3
 
-/*This number indicates how many chairs exists in the hall*/
+int amount_students;
 int number_chairs;
 int chairs_occupied = 0;
-int being_helped;
-int assistant_sleeping = 0;
-int can_sleep = 0;
-/*This variable indicates who (using the student id) is sitting in the assistant_chair and
-  is being helped in the exact moment.
-  If no one is being helped in the moment, the number id is set to -1.*/
-
-int assistant_chair = -1;
-
-sem_t semaphore, sleep;
-pthread_mutex_t mutexLock; 
+int number_students_finished = 0;
+int assistant_chair;
+pthread_t assistant_tid;
+pthread_attr_t assistant_attr;
 
 
-void go_program(void){
 
-	int program_time = rand() % 10;
-	sleep(program_time);
+void *student(void *param);
+void *assistant(void *param);
+void *go_program(int student_id);
+int get_help(int student_id);
+void wake_assistant(void);
+void being_helped(void);
+
+sem_t chairs_queue, assistant_sleep, student_being_helped;
+pthread_mutex_t chairs_mutex, student_mutex; 
+
+
+int main(){
+
+	srand(time(NULL));
+	sem_init(&chairs_queue, 0, 1);
+	sem_init(&assistant_sleep, 0, 1);
+	sem_init(&student_being_helped, 0, 1);
+	pthread_mutex_init(&chairs_mutex, NULL);
+	pthread_mutex_init(&student_mutex, NULL);
+
+
+	sem_wait(&assistant_sleep); //this makes the assistant sleep
+	sem_wait(&student_being_helped); //this makes the student waits until he/she gets helped by the assistant
+
+	int i, *student_id;
+	amount_students = rand() % (MAX_STUDENTS + 1 - MIN_STUDENTS) + MIN_STUDENTS;
+	printf("Number of students today: %d \n", amount_students);
+	number_chairs = amount_students/2;
+	
+	//Creating the assistant thread
+	pthread_attr_init(&assistant_attr);
+	pthread_create(&assistant_tid,&assistant_attr, assistant, NULL);
+
+	pthread_t *tid;
+	pthread_attr_t *attr;
+
+	tid = (pthread_t *) malloc(sizeof(pthread_t)*amount_students);
+	attr = (pthread_attr_t *) malloc(sizeof(pthread_attr_t)*amount_students);
+	student_id = (int *) malloc(sizeof(int)*amount_students);
+
+
+	for(i=0; i < amount_students; i++){
+		student_id[i] = i;
+		pthread_attr_init(&attr[i]);
+		pthread_create(&tid[i], &attr[i], student, &student_id[i]);
+	}
+
+	for(i=0; i < amount_students; i++){
+		pthread_join(tid[i], NULL);
+	}
+
+	pthread_join(assistant_tid, NULL);
+
+	sem_destroy(&chairs_queue);
+	sem_destroy(&assistant_sleep);
+	pthread_mutex_destroy(&chairs_mutex);
+	pthread_mutex_destroy(&student_mutex);
+	free(tid);
+	free(attr);
+	free(student_id);
+
+	return 0;
 }
 
 
-void wakeup_assistant(void){
-	sem_post(&sleep);
+void *student(void *param){
+	int *my_id = (int *) param;
+	int help_counter = 0;
+
+	
+	printf("I'm student %d.\n",*my_id);
+
+	while(help_counter < 3){
+		//pthread_mutex_lock(&student_mutex);	
+			go_program(*my_id);
+			if(get_help(*my_id) == 1){
+				help_counter ++;
+				printf("I'm student %d and I've been helped for %d times.\n", *my_id, help_counter);
+			}
+			else{
+				printf("I'm student %d. I didn't get my help now. I'll be back another time.\n", *my_id);
+			}
+		//pthread_mutex_unlock(&student_mutex);	
+		}
+	
+	printf("I'm student %d and I'm finishing now.\n", *my_id);
+	
+	number_students_finished++ ;
+	if(number_students_finished == amount_students){
+		pthread_cancel(assistant_tid);
+	}
+
+	pthread_exit(0);
 }
 
-void make_assistant_sleep(void){
-	can_sleep = 1;
-	sem_wait(&sleep);
+
+void *assistant(void *param){
+
+	int help_time;
+
+	while(1){
+		printf("I'm the assistant. I'm gonna sleep now.\n");
+		sem_wait(&assistant_sleep);
+
+		help_time = rand() % 100000 + 100000;
+		printf("I'm the assistant. I'm ready to help the student %d for %d us.\n",assistant_chair,help_time);
+
+		usleep(help_time);
+		printf("I'm the assistant. I've finished with student %d.\n",assistant_chair);
+		sem_post(&student_being_helped);
+
+	}
+
+	printf("I've finished work today.\n");
+	pthread_exit(0);
+
+}
+
+void *go_program(int student_id){
+	int program_time = rand() % 100000 + 100000;
+	printf("I'm student %d and I will program for %d us.\n", student_id, program_time);
+	usleep(program_time);
 }
 
 int get_help(int student_id){
 
-	/*  get_help:
-
-	  - Verifies if the assistant chair is free and he is available to help.
-	  - If the assistant chair is occupied, the student should wait in a chair in the hall.
-	  - If the number of chairs occupied is equal to the number of chairs, the function will 
-	  return 0 meaning that there's no chair available anymore, and the student should go away.
-	  - If the student got help, the variable being_helped will be set to 0 by the assistant, and
-	  this function will return 1, meaning that the student got help.
-
-	*/
-
-
 	if(chairs_occupied < number_chairs){
 
-		pthread_mutex_lock(&mutexLock);	
+		pthread_mutex_lock(&chairs_mutex);	
 			chairs_occupied ++;
-		pthread_mutex_unlock(&mutexLock);
+		pthread_mutex_unlock(&chairs_mutex);	
+		
 
-		sem_wait(&semaphore);
+		sem_wait(&chairs_queue);
+
 			assistant_chair = student_id;
-			being_helped = 1;
-			if(assistant_sleeping == 1){
-				wakeup_assistant();
-			}
-				while(being_helped > 0);
-			make_assistant_sleep();
+			printf("I'm student %d and I'll be helped now.\n", student_id);
+			wake_assistant();
+			being_helped();
 			assistant_chair = -1;
-		sem_post(&semaphore);
+			printf("I'm student %d and I got help.\n", student_id);
 
-		pthread_mutex_lock(&mutexLock);
+		sem_post(&chairs_queue);
+
+		pthread_mutex_lock(&chairs_mutex);
 			chairs_occupied--;
-		pthread_mutex_unlock(&mutexLock);
+		pthread_mutex_unlock(&chairs_mutex);
+
 		return 1;
 	}
-
-	else{
+	else
+	{
 		return 0;
 	}
 
 }
 
-
-void *std_assistant(void *param){
-
-	
-	while(1){
-
-		sem_wait(&sleep);
-
-		
-
-		while(can_sleep == 0);
-
-	}
-	pthread_exit(0);
+void wake_assistant(void){
+	sem_post(&assistant_sleep);	
 }
 
-void *student(void *param){
-
-
-	int *my_id = (int *) param;
-	int help_counter = 0;
-
-	while(help_counter < 3){
-		go_program();
-		help_counter = help_counter + get_help(*my_id);
-	}
-
-	pthread_exit(0);
+void being_helped(void){
+	sem_wait(&student_being_helped);
 }
 
-
-int main(int argc, char argv[]){
-
-
-	srand(time(NULL));
-
-	sem_init(&semaphore, 0, 1);
-	sem_init(&sleep, 0, 1);
-	pthread_mutex_init(&mutexLock, NULL);
-
-	sem_wait(&sleep); //the assistant initialize and sleep until the first student appears.
-
-	int amount_std = rand % (MAX_STUDENTS + 1 - MIN_STUDENTS) + MIN_STUDENTS;
-	number_chairs = amount_std/2;
-	int i;
-
-	pthread_t *tid;
-	pthread_attr_t *attr;
-
-	tid = (pthread_t *) malloc(sizeof(pthread_t));
-	attr = (pthread_attr_t *) malloc(sizeof(pthread_attr_t));
-
-	for(i=1; i <= amount_std; i++){
-		pthread_attr_init(&attr[i]);
-		pthread_create(&tid[i], &attr[i], student, &i);
-	}
-
-	for(i=1; i <= amount_std; i++){
-		pthread_join(tid[i], NULL);
-	}
-
-	free(chairs);
-	free(tid);
-	free(attr);
-	pthread_mutex_destroy(&mutexLock);
-
-	return 0;
-}
 
 
 
